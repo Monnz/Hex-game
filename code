@@ -1,0 +1,571 @@
+# Hex game
+#
+# Uses mouse handler to capture moves by human players
+# In addition to having human players, one can choose a computer as an
+#   opponent or pit two computer players against each other
+#  The code implements Monte Carlo based AI: it samples randomly
+#     generated board configurations and assigns score to each empty tile
+#     based on who wins
+# The AI level is proportional to the number of Monte Carlo trials.
+# The number of trials per move is 500 (level 0), 1000 (1), or 2000 (2).
+
+
+# --------------------------------------------------------
+
+# import modules
+import simplegui
+import random
+import math
+import sys
+import codeskulptor
+codeskulptor.set_timeout(60) # might need this for MC
+
+# ---------------------------------------------------------
+
+# constants
+
+# MC parameters
+# tuple with the number of MC trials for different levels
+MC_TRIALS = (500, 1000, 2000)
+# number of trials per frame
+# too many - the code will slow down or timeout on a slow CPU
+# too few - the code will not run CPU at full power on better machines
+# adjust if you experience any of these problems
+trials_per_frame = 10
+# how important are the opponent moves (e.g., the importance of blocking)
+alphaMC = 0.5
+# global counter for elapsed MC trials
+trials = 0
+# what is the no of trials for the current AI player
+# in the case we pit two AI's of different level
+current_max_trials = MC_TRIALS[0] # must be set to non-zero!!!
+
+# appearance constants
+CANVAS_SIZE = (900, 520)
+LINE_COLOR = "black"
+LINE_WIDTH = 2
+EMPTY_COLOR = "#cccccc"
+RED_COLOR = "red"
+BLUE_COLOR = "blue"
+NO_GO_COLOR = "green"
+# win message position (lines 1 and 2) and size
+W1_POS_Y = CANVAS_SIZE[1] / 2
+W2_POS_Y = 3 * CANVAS_SIZE[1] / 4
+W2_MESSAGE = "wins!"
+WINNER_SIZE = CANVAS_SIZE[1] / 5
+W_COLOR = "black"
+# size and position for "Next" in upper left corner
+next_pos = [0, 0]
+NEXT_SIZE = CANVAS_SIZE[0] / 36
+NEXT_COLOR = "black"
+# MC progress messages, position, and size
+MC1_MESSAGE = "Calculating AI move."
+MC2_MESSAGE = "Progress: "
+MC_SIZE = 18
+MC1_POS = [0, CANVAS_SIZE[1] - 2.5 * MC_SIZE]
+MC2_POS = [0, CANVAS_SIZE[1] - 1 * MC_SIZE]
+MC_RIGHT_OFFSET = 10
+MC_COLOR = "black"
+# button width
+BUTTON_W = 120
+
+# coordinates of the "next" tile
+NEXT_C = (CANVAS_SIZE[0] / 15, CANVAS_SIZE[1] / 10) # center
+NEXT_R = CANVAS_SIZE[0] / 20
+NEXT_TILE_C = [(NEXT_C[0] + NEXT_R * math.cos(i * math.pi / 3.0),
+                NEXT_C[1] + NEXT_R * math.sin(i * math.pi / 3.0))
+                     for i in range(0, 6)]
+
+
+# game constants
+# min and max board size allowed
+MIN_HEX_SIZE = 3
+MAX_HEX_SIZE = 13
+# tile constants
+EMPTY = 2
+RED = 0
+BLUE = 1
+NO_GO = 3
+# the initial game size
+game_size = 7
+# coloring list/tuple
+COLOR_LIST = (RED_COLOR, BLUE_COLOR, EMPTY_COLOR, NO_GO_COLOR)
+# name list/tuple
+PLAYER_NAME = ("Red","Blue")
+# whether red and blue are AI or human (start with both humans)
+HUMAN = False
+AI = True
+player_type = [HUMAN, HUMAN]
+AI_NAME = {HUMAN: "Human", AI: "AI"}
+# level at which AI players play; will be set when AI selected
+AI_level = [0, 0]
+
+
+# coordinates of neighboring tiles on board; used for graph search
+neighbors = ((1, 0), (1, 1), (0, 1), (-1, 0), (-1, -1), (0, -1))
+
+
+# -----------------------------------------------------------
+
+# some helper functions
+
+# cross product
+def cross(v1, v2):
+    return v1[0] * v2[1] - v1[1] * v2[0]
+
+# distance between two vectors/points
+def dist(v1, v2):
+    aux = 0.0
+    for d in range(0, 2):
+        aux += (v1[d] - v2[d]) ** 2
+    return math.sqrt(aux)
+
+# draw text in the canvas center (y coordinate given)
+def draw_text_center(canvas, text, y, size, color):
+    global frame
+    x = 0.5 * (CANVAS_SIZE[0] - frame.get_canvas_textwidth(text, size))
+    canvas.draw_text(text, (x, y), size, color)
+    
+
+# ---------------------------------------------------------
+
+# define classes
+    
+# hexboard class
+# graphics tells the constructor to also prepare drawing data
+# meant to be skipped when a board is copied by AI
+class Hexboard:
+    def __init__(self, size, graphics = True):
+        # check for the size
+        if not (MIN_HEX_SIZE <= size <= MAX_HEX_SIZE):
+            # stop the code if the size is not appropriate
+            sys.exit("Illegal hexboard size. Error!")
+        
+        # size2 is the size with the edges
+        self.size2 = size + 2
+        # get the board and set all tiles empty
+        self.board = [EMPTY for tile in
+                      range(0, self.size2 ** 2)]
+        # set the edges properly
+        for x in range(1, size + 1):
+            # top right and bottom left edges
+            self.board[x] = BLUE
+            self.board[x + (size + 1) * self.size2] = BLUE
+            # top left and bottom right edges
+            self.board[x * self.size2] = RED
+            self.board[x * self.size2 + size + 1] = RED
+        # set the corners unplayable
+        self.board[0] = NO_GO
+        self.board[self.size2 - 1] = NO_GO
+        self.board[self.size2 ** 2 - 1] = NO_GO
+        self.board[self.size2 * (self.size2 - 1)] = NO_GO
+        
+        # next player and the list of moves
+        self.nextp = RED
+        self.moves = []
+        
+        self.graphics = graphics
+        if graphics:
+            # only if hexboard created for drawing do this
+            # drawing hoopla
+            # unit vecs
+            ax = 0.5 * CANVAS_SIZE[0] / size
+            ay = 0.5 * CANVAS_SIZE[1] / size
+            self.avecs = [(ax, ay), (-ax, ay)]
+            # center of the top tile
+            self.tile0 = (0.5 * CANVAS_SIZE[0], -self.avecs[0][1])        
+        
+            # have tile corner positions here
+            # 6 corners ready
+            tile_c = [None for i in range(0, 6)]
+            aa = 2 * self.avecs[0][0] / 3 # cell size
+            for i in range(0, 6):
+                tile_c[i] = [aa * math.cos(i * math.pi / 3.0) + self.tile0[0],
+                             aa * math.sin(i * math.pi / 3.0) + self.tile0[1]]
+            self.tile_cpos = [[None for i in range(0, 6)] for tile in self.board]
+            # define tile by tile
+            tile = 0 # counting tiles
+            for x in range(0, self.size2):
+                for y in range(0, self.size2):
+                    for i in range(0, 6):
+                        self.tile_cpos[tile][i] = tuple(tile_c[i])
+                    # move to the next tile
+                    tile += 1
+                    for corner in tile_c:
+                        for d in range(0, 2):
+                            corner[d] += self.avecs[0][d]                
+                # if we arrive to the end of line do the CR and LF
+                for corner in tile_c:
+                    for d in range(0, 2):
+                        corner[d] -= self.avecs[0][d] * self.size2
+                        corner[d] += self.avecs[1][d]
+
+            
+    # copy
+    # keep_graphics = True means the drawing info is copied
+    # these can be skipped for MC
+    def copy(self, keep_graphics = True):
+        # first create an empty board
+        aux = Hexboard(self.size2 - 2, keep_graphics)
+        # copy important elements
+        aux.board = list(self.board)
+        aux.nextp = self.nextp
+        aux.moves = list(self.moves)
+        # return the hexboard
+        return aux
+    
+
+    # the list of tiles with a given value
+    def such_tiles(self, value):
+        aux = []
+        for i in range(1, self.size2 ** 2 - 1):
+            if self.board[i] == value:
+                aux.append(i)
+        return aux
+    
+    
+    # check if two fields connected by same colored tiles (RED or BLUE)
+    def are_connected(self, index1, index2):
+        if not (0 < index1 < self.size2 ** 2 - 1):
+            # index1 not well defined (corners not used)
+            sys.exit("index1 not well defined")
+        if not (0 < index2 < self.size2 ** 2 - 1):
+            # index2 not well defined
+            sys.exit("index2 not well defined")
+        if (self.board[index1] != self.board[index2]):
+            return False # cannot be connected if different color
+        # set of all tiles in this color
+        same_tiles = set(self.such_tiles(self.board[index1]))
+        fringe = set([index1]) # put first tile on the fringe
+        same_tiles.remove(index1) # and take it of the tiles set
+        while (len(fringe) > 0): # while the fringe is not empty            
+            if index2 in fringe:
+                # index2 can be popped so we finished the search
+                return True
+            node = fringe.pop() # pop an element from the fringe and expand
+            # node coordinates on the board
+            nodex = node % self.size2
+            nodey = node // self.size2
+            # iterate over neighbours
+            for n in neighbors:
+                # move to a neighbor
+                node2x = nodex + n[0]
+                node2y = nodey + n[1]
+                # if the neighbor still on board
+                if (0 <= node2x < self.size2) and (0 <= node2y < self.size2):
+                    node2 = node2x + node2y * self.size2
+                    # if this node not visited yet and of the same type
+                    if node2 in same_tiles:
+                        # add it to the fringe
+                        # and remove from the set of unexplored nodes
+                        fringe.add(node2)
+                        same_tiles.remove(node2)
+        return False # exhausted fringe, so return False
+        
+    
+    # check if player is the winner
+    def is_winner(self, player):
+        if player == BLUE:
+            return self.are_connected(1, self.size2 ** 2 - 2)
+        elif player == RED:
+            return self.are_connected(self.size2, 2 * self.size2 - 1)
+        else:
+            sys.exit("Invalid player!") # not valid player
+    
+    
+    # add tile
+    # real game is set to False for MC to speed up things
+    def play(self, index, real_game = True):
+        if not (0 < index < self.size2 ** 2 - 1):
+            return False # cannot play outside the board
+        if self.board[index] != EMPTY:
+            return False # occupied field
+        self.board[index] = self.nextp # set the next player' tile
+        
+        # check for winner if a real game (not MC test)
+        if real_game:
+            if self.is_winner(self.nextp):
+                # stop the game
+                global game_on
+                game_on = False
+                # set the winner name
+                global winner_name
+                winner_name = (PLAYER_NAME[self.nextp] + " (" +
+                               AI_NAME[player_type[self.nextp]] + ")")
+
+        self.nextp = 1 - self.nextp # change turns
+        self.moves.append(index) # update the list of moves
+        return True # return OK flag
+        
+        
+    # undo a move
+    def undo(self):
+        no_moves = len(self.moves) # number of moves
+        if no_moves <= 1: # can undo only if there are moves played
+            if no_moves == 1:
+                # undo the only move; otherwise nothing
+                self.board[self.moves[0]] = EMPTY # empty the tile
+                self.nextp = RED
+                self.moves = []
+        else:
+            # more than one move played
+            # empty the last tile
+            self.board[self.moves[no_moves - 1]] = EMPTY
+            # remove the last move from the list
+            self.moves.pop()
+            if player_type[1 - self.nextp] == HUMAN:
+                # if the previous player a human
+                # remove only last (human) move, but change player
+                self.nextp = 1 - self.nextp
+            else:
+                # otherwise two moves are removed (one for AI)
+                self.board[self.moves[no_moves - 2]] = EMPTY
+                self.moves.pop()
+
+            
+    # mouse click
+    def mouse_click(self, pos):
+        s_pos = [pos[d] - self.tile0[d] for d in range(0, 2)]
+        ij = [cross(s_pos, self.avecs[1]) / cross(self.avecs[0], self.avecs[1]),
+              cross(s_pos, self.avecs[0]) / cross(self.avecs[1], self.avecs[0])]
+        ij = (int(ij[0] + 0.5), int(ij[1] + 0.5))
+        cc = [ij[0] * self.avecs[0][d] + ij[1] * self.avecs[1][d]
+              for d in range(0, 2)] # assumed center
+        if dist(cc, s_pos) < 0.5 * self.avecs[0][0]:
+            # accept only clicks close to the tile center
+            self.play(ij[0] + ij[1] * self.size2)
+   
+    
+    # drawing
+    def draw(self, canvas):
+        # check that the hexboard is legit for drawing
+        if not self.graphics:
+            sys.exit("Cannot draw this hexboard")
+        # draw tile by tile
+        for i in range(1, self.size2 * self.size2 - 1):
+            canvas.draw_polygon(self.tile_cpos[i], LINE_WIDTH, LINE_COLOR,
+                                COLOR_LIST[self.board[i]])
+            
+        if game_on:
+            # draw the next tile
+            canvas.draw_polygon(NEXT_TILE_C, LINE_WIDTH, LINE_COLOR,
+                                COLOR_LIST[self.nextp])
+            canvas.draw_text("Next", next_pos, NEXT_SIZE, NEXT_COLOR)
+            # if game_on check if the current player is AI
+            if player_type[self.nextp] == AI:
+                # we have to deal with AI
+                global trials, current_max_trials
+                # check if we did all the trials
+                if trials >= current_max_trials:
+                    # if so set trials to zero for the next AI turn
+                    trials = 0
+                    # choose a move
+                    self.play(chooseMC())
+                else:
+                    # check if just started
+                    if trials == 0:
+                        # prepare the MC set
+                        global empty_tiles, tile_score
+                        empty_tiles = self.such_tiles(EMPTY)
+                        # dictionary counting score for empty tiles
+                        tile_score = dict([(tile, 0) for tile in empty_tiles])
+                        # set the number of samplings
+                        current_max_trials = MC_TRIALS[AI_level[self.nextp]]
+                    # in either case do a few MC trial per frame
+                    trials += trials_per_frame
+                    canvas.draw_text(MC1_MESSAGE, MC1_POS, MC_SIZE, MC_COLOR)
+                    canvas.draw_text(MC2_MESSAGE + str(trials) + "/"
+                                     + str(current_max_trials),
+                                     MC2_POS, MC_SIZE, MC_COLOR)
+                    # do a single frame MC sampling
+                    MCsample(self)
+        else: # game over
+            draw_text_center(canvas, winner_name, W1_POS_Y, WINNER_SIZE, W_COLOR)
+            draw_text_center(canvas, W2_MESSAGE, W2_POS_Y, WINNER_SIZE, W_COLOR)
+                        
+
+# -----------------------------------------------------------------
+
+# Monte Carlo AIs
+
+# single frame MC sampling
+def MCsample(hexboard):
+    global empty_tiles, tile_score
+    # sample trials_per_frame times
+    for trial in range(0, trials_per_frame):
+        random.shuffle(empty_tiles) # play in this order
+        boardcopy = hexboard.copy(False) # make a copy
+        for tile in empty_tiles:
+            boardcopy.play(tile, False) # play randomly
+        # once finished check the winner
+        if boardcopy.is_winner(hexboard.nextp):
+            # if AI is the winner
+            for i in range(0, len(empty_tiles), 2):
+                tile_score[empty_tiles[i]] += 1 # good move
+            for i in range(1, len(empty_tiles), 2):
+                # oppononent's move: let the opponent play there
+                tile_score[empty_tiles[i]] -= alphaMC
+        else: # AI lost
+            for i in range(0, len(empty_tiles), 2):
+                tile_score[empty_tiles[i]] -= 1 # bad move
+            for i in range(1, len(empty_tiles), 2):
+                # oppononent's move: block
+                tile_score[empty_tiles[i]] += alphaMC
+
+                
+# when already finished sampling, this finds the best tile
+def chooseMC():
+    # the worst possible score
+    best_score = -(1 + alphaMC) * current_max_trials
+    best_tile = []
+    global tile_score
+    for tile in tile_score:
+        if tile_score[tile] >= best_score:
+            if tile_score[tile] == best_score:
+                # if tied
+                best_tile.append(tile)
+            else: # we found a better tile
+                # update best score
+                best_score = tile_score[tile]
+                best_tile = [tile]
+
+    return random.choice(best_tile) # choose among the best
+            
+
+# -----------------------------------------------------------------
+            
+# Handler for mouse click
+def click(pos):
+    if game_on: # accept moves only in play
+        if player_type[my_board.nextp] == HUMAN: # and if human is to play
+            my_board.mouse_click(pos)
+
+# Handler to draw on canvas
+def draw(canvas):
+    global my_board
+    my_board.draw(canvas)
+
+    
+# -----------------------------------------------------------------
+
+# more helpers (used by the button handlers)
+
+def new_game():
+    global my_board
+    my_board = Hexboard(game_size)  
+    global game_on, trials
+    game_on = True
+    trials = 0 # so MC restarts OK
+ 
+def undo():
+    # allow undo only when human is playing
+    if game_on and player_type[my_board.nextp] == HUMAN:
+        my_board.undo()
+        
+
+def set_board_size(size):
+    global game_size
+    game_size = size
+    new_game()
+
+# set the player to be human or AI
+def set_player_type(player, ptype, level = 0): 
+    player_type[player] = ptype
+    global trials
+    # set to zero to ensure MC restarts correctly
+    trials = 0
+    name = AI_NAME[ptype]
+    if ptype == AI:
+        # if dealing with AI, put the level in the name
+        name = name + " level " + str(level)
+        # and set the level correctly
+        AI_level[player] = level
+    if player == RED:
+        Rlabel.set_text("Red: " + name)
+    elif player == BLUE:
+        Blabel.set_text("Blue: " + name)
+    else:
+        sys.exit("Trying to set player type for neither Red or Blue player!")    
+   
+# --------------------------------------------------------------------------
+    
+# button handlers    
+
+def set7x7():
+    set_board_size(7)
+    
+def set9x9():
+    set_board_size(9)
+    
+def set11x11():
+    set_board_size(11)
+    
+def setRhuman():
+    set_player_type(RED, HUMAN)
+    
+def setBhuman():
+    set_player_type(BLUE, HUMAN)
+    
+def setRMC0():
+    set_player_type(RED, AI, 0)
+    
+def setRMC1():
+    set_player_type(RED, AI, 1)
+    
+def setRMC2():
+    set_player_type(RED, AI, 2)
+    
+def setBMC0():
+    set_player_type(BLUE, AI, 0)
+    
+def setBMC1():
+    set_player_type(BLUE, AI, 1)
+    
+def setBMC2():
+    set_player_type(BLUE, AI, 2)
+
+# -----------------------------------------------------------------
+    
+# Create a frame and assign callbacks to event handlers
+frame = simplegui.create_frame("Hex", CANVAS_SIZE[0], CANVAS_SIZE[1])
+frame.set_canvas_background(NO_GO_COLOR)
+frame.set_mouseclick_handler(click)
+frame.add_button("New game", new_game, BUTTON_W)
+frame.add_label("")
+frame.add_button("Undo", undo, BUTTON_W)
+frame.add_label("")
+frame.add_label("Board size:")
+frame.add_button("7x7", set7x7, BUTTON_W)
+frame.add_button("9x9", set9x9, BUTTON_W)
+frame.add_button("11x11", set11x11, BUTTON_W)
+frame.add_label("")
+Rlabel = frame.add_label("Red: " + AI_NAME[player_type[0]])
+frame.add_button(AI_NAME[HUMAN], setRhuman, BUTTON_W)
+frame.add_button(AI_NAME[AI] + " level 0", setRMC0, BUTTON_W)
+frame.add_button(AI_NAME[AI] + " level 1", setRMC1, BUTTON_W)
+frame.add_button(AI_NAME[AI] + " level 2", setRMC2, BUTTON_W)
+Blabel = frame.add_label("Blue: " + AI_NAME[player_type[1]])
+frame.add_button(AI_NAME[HUMAN], setBhuman, BUTTON_W)
+frame.add_button(AI_NAME[AI] + " level 0", setBMC0, BUTTON_W)
+frame.add_button(AI_NAME[AI] + " level 1", setBMC1, BUTTON_W)
+frame.add_button(AI_NAME[AI] + " level 2", setBMC2, BUTTON_W)
+frame.set_draw_handler(draw)
+
+# -----------------------------------------------------------------
+
+# get text positions knowning how wide they appear on canvas
+MC1_POS[0] = (CANVAS_SIZE[0] - MC_RIGHT_OFFSET -
+             frame.get_canvas_textwidth(MC1_MESSAGE, MC_SIZE))
+MC2_POS[0] = MC1_POS[0]
+next_pos = (NEXT_C[0] - 0.5 * frame.get_canvas_textwidth("Next", NEXT_SIZE),
+            NEXT_C[1] + 0.3 * NEXT_SIZE)
+
+# -----------------------------------------------------------------
+
+# start the game
+new_game()
+
+# -----------------------------------------------------------------
+
+# Start the frame animation
+frame.start()
